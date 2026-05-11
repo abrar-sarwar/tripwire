@@ -8,3 +8,4 @@ packaged.yaml
 *.zip
 .DS_Store
 .aws-sam/
+.claude/
