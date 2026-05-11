@@ -2,7 +2,9 @@
 set -euo pipefail
 
 REGION="us-east-1"
-ACCOUNT_ID="123456789012"
+# Derive the account ID dynamically so this script is portable across accounts.
+# Override with: ACCOUNT_ID=123456789012 ./scripts/deploy.sh
+ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 STACK_NAME="tripwire"
 DEPLOY_BUCKET="tripwire-cfn-${ACCOUNT_ID}-${REGION}"
 SNS_TOPIC_ARN="arn:aws:sns:${REGION}:${ACCOUNT_ID}:tripwire-alerts"

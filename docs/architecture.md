@@ -41,7 +41,7 @@
                               ▼
                          ┌────────┐         ┌────────────────────┐
                          │  SNS:  │────────▶│   email inbox      │
-                         │tripwire│         │ your-email@…     │
+                         │tripwire│         │ your-email@…       │
                          │-alerts │         └────────────────────┘
                          └────────┘
 ```
