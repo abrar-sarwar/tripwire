@@ -70,8 +70,8 @@ def _remediate(bucket):
     s3 = boto3.client("s3")
     try:
         s3.delete_bucket_policy(Bucket=bucket)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"delete_bucket_policy failed (continuing): {e.__class__.__name__}: {e}")
     try:
         s3.put_public_access_block(
             Bucket=bucket,
@@ -82,6 +82,7 @@ def _remediate(bucket):
         )
         return True, "bucket policy deleted and PublicAccessBlock re-applied (all four flags)."
     except Exception as e:
+        print(f"put_public_access_block failed: {e.__class__.__name__}: {e}")
         return False, f"FAILED ({e.__class__.__name__}): {e}"
 
 
