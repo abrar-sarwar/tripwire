@@ -70,6 +70,68 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt RootLoginRule.Arn
 
+  # ────────────────────────────────────────────────────────────────────
+  # Detection #2 — IAM Access Key Created
+  # ATT&CK: T1098.001
+  # ────────────────────────────────────────────────────────────────────
+
+  IamKeyCreatedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tripwire-iam-key-created
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Timeout: 15
+      MemorySize: 128
+      Role: !GetAtt IamKeyCreatedRole.Arn
+      Code: ./lambdas/iam_key_created
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+
+  IamKeyCreatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PublishAlerts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SnsTopicArn
+
+  IamKeyCreatedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: tripwire-iam-key-created
+      Description: Fires when an IAM access key is created.
+      EventPattern:
+        source: ["aws.iam"]
+        detail-type: ["AWS API Call via CloudTrail"]
+        detail:
+          eventSource: ["iam.amazonaws.com"]
+          eventName: ["CreateAccessKey"]
+      Targets:
+        - Arn: !GetAtt IamKeyCreatedFunction.Arn
+          Id: IamKeyCreatedTarget
+
+  IamKeyCreatedPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IamKeyCreatedFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IamKeyCreatedRule.Arn
+
 Outputs:
   StackRegion:
     Value: !Ref AWS::Region
