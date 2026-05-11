@@ -132,6 +132,203 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt IamKeyCreatedRule.Arn
 
+  # ────────────────────────────────────────────────────────────────────
+  # Detection #3 — S3 Bucket Made Public (alert + auto-remediate)
+  # ATT&CK: T1530
+  # ────────────────────────────────────────────────────────────────────
+
+  S3PublicFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tripwire-s3-public
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt S3PublicRole.Arn
+      Code: ./lambdas/s3_public
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+          PROTECTED_BUCKETS: !Sub "tripwire-cloudtrail-${AWS::AccountId}-${AWS::Region},tripwire-cfn-${AWS::AccountId}-${AWS::Region}"
+
+  S3PublicRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AlertAndRemediate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SnsTopicArn
+              - Effect: Allow
+                Action:
+                  - s3:DeleteBucketPolicy
+                  - s3:PutPublicAccessBlock
+                Resource: "*"
+
+  S3PublicRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: tripwire-s3-public
+      Description: Fires on s3 actions that expose a bucket publicly.
+      EventPattern:
+        source: ["aws.s3"]
+        detail-type: ["AWS API Call via CloudTrail"]
+        detail:
+          eventSource: ["s3.amazonaws.com"]
+          eventName: ["PutBucketPolicy", "PutBucketAcl", "DeletePublicAccessBlock"]
+      Targets:
+        - Arn: !GetAtt S3PublicFunction.Arn
+          Id: S3PublicTarget
+
+  S3PublicPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref S3PublicFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3PublicRule.Arn
+
+  # ────────────────────────────────────────────────────────────────────
+  # Detection #4 — SG opens SSH/RDP to internet (alert + auto-revoke)
+  # ATT&CK: T1190
+  # ────────────────────────────────────────────────────────────────────
+
+  SgOpenFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tripwire-sg-open
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt SgOpenRole.Arn
+      Code: ./lambdas/sg_open
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+
+  SgOpenRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AlertAndRemediate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SnsTopicArn
+              - Effect: Allow
+                Action:
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:DescribeSecurityGroups
+                Resource: "*"
+
+  SgOpenRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: tripwire-sg-open
+      Description: Fires on EC2 authorize-ingress that opens management ports to internet.
+      EventPattern:
+        source: ["aws.ec2"]
+        detail-type: ["AWS API Call via CloudTrail"]
+        detail:
+          eventSource: ["ec2.amazonaws.com"]
+          eventName: ["AuthorizeSecurityGroupIngress"]
+      Targets:
+        - Arn: !GetAtt SgOpenFunction.Arn
+          Id: SgOpenTarget
+
+  SgOpenPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SgOpenFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SgOpenRule.Arn
+
+  # ────────────────────────────────────────────────────────────────────
+  # Detection #5 — CloudTrail Disabled / Deleted / Validation-Off
+  # ATT&CK: T1562.008
+  # ────────────────────────────────────────────────────────────────────
+
+  CloudTrailDisabledFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tripwire-cloudtrail-disabled
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Timeout: 15
+      MemorySize: 128
+      Role: !GetAtt CloudTrailDisabledRole.Arn
+      Code: ./lambdas/cloudtrail_disabled
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+
+  CloudTrailDisabledRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PublishAlerts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SnsTopicArn
+
+  CloudTrailDisabledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: tripwire-cloudtrail-disabled
+      Description: Fires when CloudTrail is stopped, deleted, or has log validation disabled.
+      EventPattern:
+        source: ["aws.cloudtrail"]
+        detail-type: ["AWS API Call via CloudTrail"]
+        detail:
+          eventSource: ["cloudtrail.amazonaws.com"]
+          eventName: ["StopLogging", "DeleteTrail", "UpdateTrail"]
+      Targets:
+        - Arn: !GetAtt CloudTrailDisabledFunction.Arn
+          Id: CloudTrailDisabledTarget
+
+  CloudTrailDisabledPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CloudTrailDisabledFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudTrailDisabledRule.Arn
+
 Outputs:
   StackRegion:
     Value: !Ref AWS::Region
