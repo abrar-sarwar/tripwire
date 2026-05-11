@@ -7,11 +7,68 @@ Parameters:
     Description: ARN of the pre-existing tripwire-alerts SNS topic.
 
 Resources:
-  TripWirePlaceholder:
-    Type: AWS::Logs::LogGroup
+
+  # ────────────────────────────────────────────────────────────────────
+  # Detection #1 — Root Account Console Login
+  # ATT&CK: T1078.004
+  # ────────────────────────────────────────────────────────────────────
+
+  RootLoginFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      LogGroupName: /tripwire/placeholder
-      RetentionInDays: 7
+      FunctionName: tripwire-root-login
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Timeout: 15
+      MemorySize: 128
+      Role: !GetAtt RootLoginRole.Arn
+      Code: ./lambdas/root_login
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+
+  RootLoginRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PublishAlerts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SnsTopicArn
+
+  RootLoginRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: tripwire-root-login
+      Description: Fires on any root console login (success or fail).
+      EventPattern:
+        source: ["aws.signin"]
+        detail-type: ["AWS Console Sign In via CloudTrail"]
+        detail:
+          userIdentity:
+            type: ["Root"]
+      Targets:
+        - Arn: !GetAtt RootLoginFunction.Arn
+          Id: RootLoginTarget
+
+  RootLoginPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RootLoginFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RootLoginRule.Arn
 
 Outputs:
   StackRegion:

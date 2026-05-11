@@ -1,0 +1,26 @@
+{
+  "version": "0",
+  "id": "abc-123",
+  "detail-type": "AWS Console Sign In via CloudTrail",
+  "source": "aws.signin",
+  "account": "123456789012",
+  "time": "2026-05-11T14:32:11Z",
+  "region": "us-east-1",
+  "detail": {
+    "eventVersion": "1.08",
+    "userIdentity": {
+      "type": "Root",
+      "principalId": "123456789012",
+      "arn": "arn:aws:iam::123456789012:root",
+      "accountId": "123456789012"
+    },
+    "eventTime": "2026-05-11T14:32:11Z",
+    "eventSource": "signin.amazonaws.com",
+    "eventName": "ConsoleLogin",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "203.0.113.42",
+    "userAgent": "Mozilla/5.0",
+    "eventID": "evt-root-001",
+    "responseElements": {"ConsoleLogin": "Success"}
+  }
+}
