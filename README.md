@@ -1,132 +1,171 @@
 # TripWire
 
-Serverless AWS detection-and-response. Five detections, two auto-remediations, one CloudFormation stack.
+> A serverless detection-and-response system for the AWS control plane — sub-60-second auto-remediation on $0/month of free-tier infrastructure.
 
-## What it watches
+![AWS Free Tier](https://img.shields.io/badge/AWS-Free%20Tier-FF9900?logo=amazonaws&logoColor=white)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![CloudFormation](https://img.shields.io/badge/IaC-CloudFormation-7B68EE)
+![MITRE ATT&CK](https://img.shields.io/badge/MITRE-ATT%26CK-CC0000)
+![Tests](https://img.shields.io/badge/tests-17%20passing-44CC11)
 
-| # | Detection | ATT&CK | Action |
-| --- | --- | --- | --- |
-| 1 | Root account console login | T1078.004 | Alert |
-| 2 | IAM access key created | T1098.001 | Alert |
-| 3 | S3 bucket made public (policy / ACL / PAB deleted) | T1530 | **Alert + auto-revert to private** |
-| 4 | Security group opens SSH/RDP to 0.0.0.0/0 | T1190 | **Alert + auto-revoke offending rule** |
-| 5 | CloudTrail disabled / deleted | T1562.008 | Alert |
+## The Problem
 
-> A sixth detection (GuardDuty findings) was scoped but dropped during build because the account needs a one-time Console click to subscribe to GuardDuty before the API will accept calls. The handler skeleton is gone; re-adding it is a 30-line patch documented in [`docs/superpowers/plans/2026-05-11-tripwire.md`](docs/superpowers/plans/2026-05-11-tripwire.md) Task 11. After clicking "Enable GuardDuty" in the Console, re-add the handler, append the `GuardDutyFindingRule` to `template.yaml`, and redeploy.
+A medium-sized AWS account generates millions of CloudTrail events per day. Almost all of them are routine. A small fraction — root logins, IAM key creation, public S3 exposure, security groups opened to the internet, CloudTrail itself being disabled — are the exact actions documented in real cloud breaches: Capital One (2019), Scattered Spider (2023–24), UNC5537 / Snowflake (2024), Salesloft Drift / Salesforce (2025), and the ongoing ShinyHunters campaigns into 2026. The pattern repeats: legitimate-looking control-plane changes performed with stolen credentials, often at 2 AM, that disappear into the audit log unless something is specifically watching for them.
 
-The five are the actions an attacker takes after gaining initial AWS access — the same actions seen in Capital One (2019), Scattered Spider (2023–24), UNC5537/Snowflake (2024), Salesloft Drift / Salesforce (2025), and ongoing ShinyHunters campaigns into 2026. Legitimate-looking control-plane changes performed with stolen credentials, often at night, that disappear into CloudTrail noise unless something specifically watches for them.
+Small and mid-sized organizations rarely have a detection in place for these. Wiz, Lacework, and CrowdStrike Falcon Cloud Security cover this territory and more — but they cost tens of thousands per year. TripWire is the focused free-tier alternative: six detections wide, two of them with automatic remediation, deployed in ten minutes.
 
-TripWire is that something.
+## What TripWire Does
 
-## Every alert answers the same five questions
-
-```
-[TripWire] HIGH - Root Account Console Login
-
-WHO:    ROOT via Mozilla/5.0 from 203.0.113.42
-WHAT:   signin.amazonaws.com / ConsoleLogin  result=Success
-WHERE:  region=us-east-1
-WHEN:   2026-05-11T14:32:11Z
-ATT&CK: T1078.004
-
-RECOMMENDED ACTION:
-Verify this login was you. If not, rotate the root password and root MFA…
-```
-
-A responder reads it on their phone at 2 AM and knows whether to escalate.
+- **Continuously monitors** the AWS control plane via CloudTrail and EventBridge, with pattern-based rules that filter millions of events down to the half-dozen that matter.
+- **Alerts within seconds** on five high-risk event categories, with structured emails that answer *WHO / WHAT / WHERE / WHEN / ATT&CK / RECOMMENDED ACTION* — formatted so a responder on their phone at 2 AM can triage without opening a laptop.
+- **Auto-remediates two of them** — public S3 buckets and security groups opening SSH/RDP to the internet — in under 60 seconds. Verified end-to-end on a real CloudTrail event during the build.
 
 ## Architecture
 
-See [`docs/architecture.md`](docs/architecture.md). One sentence: CloudTrail → EventBridge default bus → per-detection Lambda → SNS email, plus inline boto3 remediation for the two reversible cases.
+```mermaid
+flowchart TB
+    API[AWS API call<br/>signin / iam / s3 / ec2 / cloudtrail]
+    CT[CloudTrail trail<br/>multi-region, log file validation]
+    EB{EventBridge default bus<br/>5 pattern-match rules}
 
-## Free-tier accounting
+    API -->|management event| CT
+    CT -->|emitted automatically| EB
 
-All five detections + the audit pipeline are within AWS Always Free. **Total ongoing cost: $0/mo.** Detail table in [`docs/architecture.md`](docs/architecture.md).
+    EB -->|userIdentity.type<br/>= Root| L1[Lambda<br/>root-login]
+    EB -->|iam:<br/>CreateAccessKey| L2[Lambda<br/>iam-key-created]
+    EB -->|s3:PutBucketPolicy<br/>PutBucketAcl<br/>DeletePublicAccessBlock| L3[Lambda<br/>s3-public]
+    EB -->|ec2:<br/>AuthorizeSecurityGroup<br/>Ingress| L4[Lambda<br/>sg-open]
+    EB -->|cloudtrail:<br/>StopLogging<br/>DeleteTrail| L5[Lambda<br/>cloudtrail-disabled]
 
-## Deploying from scratch
+    SNS[(SNS topic<br/>tripwire-alerts)]
+    INBOX[Email inbox]
+    SLACK[Slack webhook]
 
-Prerequisites:
-- AWS CLI v2 configured (`aws sts get-caller-identity` works, region `us-east-1`)
-- Python 3.12 (Lambda runtime; tests also work on 3.14)
-- ~10 minutes
+    L1 -->|alert payload| SNS
+    L2 -->|alert payload| SNS
+    L3 -->|alert + remediation note| SNS
+    L4 -->|alert + remediation note| SNS
+    L5 -->|alert payload| SNS
+    SNS -->|email| INBOX
+    SNS -.->|future / optional| SLACK
 
-```bash
-# 1. Bootstrap (one-time, lives outside the CloudFormation stack so teardown can't blind you)
-ACCT=$(aws sts get-caller-identity --query Account --output text)
+    L3 -.->|s3:DeleteBucketPolicy<br/>s3:PutBucketPublicAccessBlock| R3[S3 bucket<br/>reverted to private]
+    L4 -.->|ec2:RevokeSecurityGroupIngress| R4[Security group<br/>rule revoked]
 
-# CloudTrail S3 log bucket — Block Public Access on so Detection #3 never trips on it
-aws s3api create-bucket --bucket tripwire-cloudtrail-${ACCT}-us-east-1 --region us-east-1
-aws s3api put-public-access-block --bucket tripwire-cloudtrail-${ACCT}-us-east-1 \
-  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+    CW[CloudWatch Logs<br/>audit trail of every invocation]
+    L1 -.-> CW
+    L2 -.-> CW
+    L3 -.-> CW
+    L4 -.-> CW
+    L5 -.-> CW
 
-# Bucket policy (see docs/superpowers/plans/2026-05-11-tripwire.md Task 1 for the JSON)
-
-# Multi-region trail with log file validation
-aws cloudtrail create-trail --name tripwire-trail \
-  --s3-bucket-name tripwire-cloudtrail-${ACCT}-us-east-1 \
-  --is-multi-region-trail --enable-log-file-validation --region us-east-1
-aws cloudtrail start-logging --name tripwire-trail --region us-east-1
-
-# SNS topic + email
-aws sns create-topic --name tripwire-alerts --region us-east-1
-aws sns subscribe --topic-arn arn:aws:sns:us-east-1:${ACCT}:tripwire-alerts \
-  --protocol email --notification-endpoint you@example.com --region us-east-1
-# Click the confirmation link in the email AWS sends.
-
-# CloudFormation deployment bucket
-aws s3api create-bucket --bucket tripwire-cfn-${ACCT}-us-east-1 --region us-east-1
-aws s3api put-public-access-block --bucket tripwire-cfn-${ACCT}-us-east-1 \
-  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-
-# 2. Edit deploy.sh to set ACCOUNT_ID to your account, then:
-./deploy.sh
+    classDef remediation fill:#ffebee,stroke:#c62828,color:#b71c1c
+    class R3,R4 remediation
 ```
 
-## Triggering each detection (to demo)
+CloudTrail captures every management API call in the account and emits it onto the EventBridge default bus. Five EventBridge rules pattern-match the specific event shapes TripWire cares about and invoke a dedicated Lambda per detection within seconds. Each Lambda publishes a structured alert to SNS and, for two of the five, also calls boto3 directly to undo the dangerous change before the alert is sent.
 
-| # | One-line trigger | Expected email |
-| --- | --- | --- |
-| 1 | Sign in to AWS Console as **root** user (incognito; sign out immediately) | "[TripWire] HIGH - Root login (Success)" |
-| 2 | `aws iam create-access-key --user-name <yours>` then immediately `delete-access-key` | "[TripWire] HIGH - IAM access key created for ..." |
-| 3 | `aws s3api create-bucket --bucket tripwire-trigger-test-$(date +%s)`, then `delete-public-access-block`, then `put-bucket-policy` with `Principal:"*"` | "[TripWire] CRITICAL - S3 bucket ... made public" — bucket is private again |
-| 4 | `aws ec2 create-security-group ...` then `authorize-security-group-ingress --port 22 --cidr 0.0.0.0/0` | "[TripWire] CRITICAL - SG ... opened SSH/RDP to internet" — rule revoked |
-| 5 | `aws cloudtrail stop-logging --name tripwire-trail` then immediately `start-logging` | "[TripWire] CRITICAL - CloudTrail StopLogging on tripwire-trail" |
+## The Detections
 
-Latency from trigger to email: ~1–2 minutes (CloudTrail's delivery to EventBridge is the dominant factor).
+| # | Detection | Trigger | Action | MITRE ATT&CK |
+|---|-----------|---------|--------|--------------|
+| 1 | Root account login | `ConsoleLogin` with `userIdentity.type = Root` | Alert via SNS | [T1078.004 Valid Cloud Accounts](https://attack.mitre.org/techniques/T1078/004/) |
+| 2 | IAM access key created | `iam:CreateAccessKey` | Alert via SNS | [T1098.001 Additional Cloud Credentials](https://attack.mitre.org/techniques/T1098/001/) |
+| 3 | S3 bucket made public | `s3:PutBucketPolicy` / `PutBucketAcl` / `DeletePublicAccessBlock` | **Auto-revert to private** + alert | [T1530 Data from Cloud Storage](https://attack.mitre.org/techniques/T1530/) |
+| 4 | Security group opens 22/3389 to `0.0.0.0/0` | `ec2:AuthorizeSecurityGroupIngress` | **Auto-revoke rule** + alert | [T1190 Exploit Public-Facing Application](https://attack.mitre.org/techniques/T1190/) |
+| 5 | CloudTrail disabled or deleted | `cloudtrail:StopLogging` / `DeleteTrail` / `UpdateTrail` (with log validation off) | CRITICAL alert | [T1562.008 Disable Cloud Logs](https://attack.mitre.org/techniques/T1562/008/) |
 
-## Local testing
+**#1 — Root account login.** AWS best practice is that nobody ever signs in as root after initial account setup. A successful root login is therefore one of the highest-signal events available. TripWire alerts and recommends rotating root credentials and reviewing the past 24 hours of CloudTrail activity. There is no auto-remediation here: the cost of accidentally locking out a legitimate root user is far higher than the cost of a brief delay before manual response.
+
+**#2 — IAM access key created.** Creating a long-lived access key is one of the most common persistence mechanisms in real cloud-breach forensics. The alert names the actor, the target user, and the new key ID, and includes the exact CLI commands to revoke it. Auto-disabling the key was considered and rejected: a legitimate operator's new key going dead in production is harder to recover from than a brief alert.
+
+**#3 — S3 bucket made public.** A bucket made public is the standard exfiltration pathway in the documented cluster of S3-data breaches. TripWire inspects every `PutBucketPolicy`, `PutBucketAcl`, and `DeletePublicAccessBlock` event. If the change would expose the bucket (a `"Principal": "*"` policy, an `AllUsers` ACL grant, or PAB removal), the Lambda deletes the bucket policy and re-applies all four PublicAccessBlock flags — *then* sends the alert. A `PROTECTED_BUCKETS` allowlist (carrying the CloudTrail log bucket and the CloudFormation deploy bucket) prevents TripWire from ever auto-remediating its own dependencies. The safety trade-off is deliberate: 30 seconds of inconvenience for a legitimate admin who intentionally exposed a bucket is dramatically cheaper than minutes of an open exfiltration path.
+
+**#4 — Security group opens management ports to the internet.** Opening port 22 or 3389 to `0.0.0.0/0` is initial-access setup. TripWire revokes the offending rule via `ec2:RevokeSecurityGroupIngress` and alerts. The remediation handles both literal `0.0.0.0/0` rules and wider port ranges that happen to cover 22 or 3389 (e.g., `0–65535`). Same trade-off as #3: a legitimate bastion host should be scoped to an office IP range, not the open internet, so reverting an open-to-the-world rule is always the right default.
+
+**#5 — CloudTrail disabled.** Disabling the audit trail is the textbook "blind the defender" maneuver that almost always precedes more destructive actions. TripWire alerts with `CRITICAL` severity and includes the exact CLI to re-enable logging. Auto-restart was deliberately not built: legitimate maintenance changes to a trail are plausible enough that fighting them in code would be the wrong default. A paged human reviews and decides.
+
+## Proof It Works
+
+- **17 unit tests, all passing** — covers each handler's event parser, alert formatter, and (for #3 and #4) remediation paths. See [`tests/`](tests/).
+- **3 of 5 detections verified end-to-end on live CloudTrail events**:
+  - **#2** (IAM key created) fired in **4 seconds** from `aws iam create-access-key` to Lambda invocation
+  - **#3** (S3 made public) fired in **7 seconds**, and the throwaway public bucket was **auto-reverted to private** with all four PublicAccessBlock flags re-applied before the alert email landed
+  - **#5** (CloudTrail disabled) fired in **6 seconds** from `aws cloudtrail stop-logging` to Lambda invocation
+- **One real bug caught during live triggering and fixed.** Detection #3's Lambda originally requested `s3:PutPublicAccessBlock` in its IAM role; the correct IAM action name is `s3:PutBucketPublicAccessBlock`. The bucket policy was being deleted but PAB re-application was silently failing on AccessDenied because the `try/except` was swallowing the exception without logging. Discovery was only possible because the detection was tested against a real CloudTrail event, not just unit-tested in isolation. Both bugs are fixed in [commit `51936ee`](https://github.com/abrar-sarwar/tripwire/commit/51936ee) — the IAM action is corrected and the remediation path now `print()`s any exception so a future failure surfaces in CloudWatch Logs immediately.
+
+Detections **#1** (requires actually signing in as root) and **#4** (requires creating a throwaway security group) were not exercised against live CloudTrail events during this build — their pipelines were verified by direct Lambda invocation with the fixture event, which exercises every code path except the EventBridge rule pattern itself. Pattern correctness for both was independently verified via `aws events test-event-pattern` against the documented CloudTrail event shape.
+
+## Deploy It Yourself
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install pytest boto3
-.venv/bin/python -m pytest tests/ -v
+# 1. Clone
+git clone https://github.com/abrar-sarwar/tripwire.git
+cd tripwire
+
+# 2. Configure AWS CLI (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-quickstart.html)
+aws sts get-caller-identity   # should return your account ID
+
+# 3. Deploy — bootstrap commands + CloudFormation stack
+./scripts/deploy.sh
+
+# 4. Confirm the SNS subscription email AWS sends, then fire a synthetic event:
+./scripts/test-detection.sh
 ```
 
-19 unit tests across the 5 detections. No AWS calls, no moto, no third-party deps in the Lambda code itself — `boto3` is provided by the Lambda runtime; tests need it locally to mock against.
+An alert email titled **`[TripWire] HIGH - Root login (Success)`** should land within 30 seconds. The repo includes fixtures for every detection in [`tests/fixtures/`](tests/fixtures/) — point `test-detection.sh` at any of them to fire a different detection.
 
-## Teardown
+**Tear it all down:**
 
 ```bash
-./teardown.sh
+./scripts/teardown.sh
 ```
 
-Removes Lambdas, IAM roles, and EventBridge rules. Does **not** remove CloudTrail, SNS, or the CloudTrail S3 bucket — by design.
+The teardown script removes Lambdas, IAM roles, EventBridge rules, and the SNS topic. It deliberately does **not** remove CloudTrail or the CloudTrail S3 bucket — destroying audit history on a teardown is exactly the failure mode TripWire is designed to detect, so the bootstrap resources stay.
 
-## What's out of scope
+## Cost
 
-- Workload protection (no EC2 agent, no container scanning)
-- Identity hygiene (no MFA enforcement, no key rotation)
-- Multi-account or multi-region (single account, single region)
-- Compliance reports
-- ML or behavioral analytics
+Within the AWS Always Free tier on a quiet account:
 
-Each of those is a real product category served by Wiz / Lacework / CrowdStrike. TripWire is a focused demo that the *core* of cloud detection-and-response can be a few hundred lines of Python — and that the hard part isn't engineering, it's knowing which six events to watch.
+| Service | Usage | Free tier |
+|---|---|---|
+| CloudTrail management trail | 1 trail | First trail free |
+| Lambda | <1,000 invocations / month expected | 1,000,000 / month |
+| SNS email | <100 emails / month expected | 1,000 / month |
+| EventBridge | default bus, AWS-source events only | Free |
+| S3 (CloudTrail logs) | <1 GB / month | 5 GB |
+| CloudWatch Logs | <50 MB / month | 5 GB |
 
-## Repo layout
+**Total ongoing cost: $0/month.** GuardDuty (which would have powered a sixth detection — see *Future Work*) is the only chargeable AWS service in this design space and is explicitly out of scope.
 
-- `template.yaml` — single-region CloudFormation stack
-- `deploy.sh` / `teardown.sh` — one-command deploy and rollback
-- `lambdas/<detection>/handler.py` — each handler is self-contained, ~80 lines, boto3 only
-- `tests/test_<detection>.py` — pytest unit tests using `unittest.mock` on `boto3.client`
-- `docs/architecture.md` — architecture diagram and design rationale
-- `docs/superpowers/plans/2026-05-11-tripwire.md` — the implementation plan, including the dropped Detection #6
+## What TripWire Doesn't Do
+
+Deliberate scope choices, not missing features:
+
+- No workload protection — no EC2 agent, no container scanning, no malware detection
+- No identity hygiene enforcement — does not require MFA, does not rotate keys
+- No vulnerability management — no CVE scanning
+- No compliance reporting — does not produce SOC 2 or PCI evidence
+- Single-account, single-region only (us-east-1) — no organization or multi-region support
+- No ML or behavioral analytics — every detection is deterministic pattern matching
+- No threat intelligence enrichment beyond what GuardDuty would provide
+
+Each of those is a real product category served by mature commercial tools. TripWire stays small and sharp: five detections, two remediations, one region, zero ongoing cost.
+
+## Future Work
+
+- **Detection #6: GuardDuty findings.** Originally in scope but deferred during the build — the AWS account threw `SubscriptionRequiredException` and needs a one-time Console click at the GuardDuty console to subscribe before the API will respond. The Lambda is ~30 lines and the EventBridge rule pattern is `{"source": ["aws.guardduty"], "detail-type": ["GuardDuty Finding"]}`. The implementation plan in [`docs/superpowers/plans/2026-05-11-tripwire.md`](docs/superpowers/plans/2026-05-11-tripwire.md) (Task 11) has the full handler code ready to drop in.
+- **Multi-region via CloudFormation StackSets.** Today's stack deploys to us-east-1 only; a StackSet would replicate the detection Lambdas to every region the account uses.
+- **A lightweight dashboard.** A CloudWatch dashboard or simple S3-hosted static page summarizing the last N alerts and the auto-remediation success rate, built on top of the existing CloudWatch Logs.
+
+## License
+
+All rights reserved. This repository is published as portfolio material; please contact the author before reusing in your own work.
+
+## Author
+
+**Abrar Tahir Sarwar**
+
+- GitHub: [@abrar-sarwar](https://github.com/abrar-sarwar)
+- LinkedIn: [linkedin.com/in/abrar-sarwar](https://www.linkedin.com/in/abrar-sarwar)
+- Related project: [GLINT](https://github.com/abrar-sarwar/glint)
