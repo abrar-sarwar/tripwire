@@ -1,0 +1,32 @@
+{
+  "version": "0",
+  "id": "abc-400",
+  "detail-type": "AWS API Call via CloudTrail",
+  "source": "aws.ec2",
+  "account": "123456789012",
+  "time": "2026-05-11T15:50:00Z",
+  "region": "us-east-1",
+  "detail": {
+    "eventVersion": "1.08",
+    "userIdentity": {"type": "IAMUser", "arn": "arn:aws:iam::123456789012:user/abrar-admin", "userName": "abrar-admin"},
+    "eventTime": "2026-05-11T15:50:00Z",
+    "eventSource": "ec2.amazonaws.com",
+    "eventName": "AuthorizeSecurityGroupIngress",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "203.0.113.77",
+    "userAgent": "aws-cli/2.34.45",
+    "requestParameters": {
+      "groupId": "sg-0123456789abcdef0",
+      "ipPermissions": {
+        "items": [{
+          "ipProtocol": "tcp",
+          "fromPort": 22,
+          "toPort": 22,
+          "ipRanges": {"items": [{"cidrIp": "0.0.0.0/0"}]},
+          "ipv6Ranges": {"items": []}
+        }]
+      }
+    },
+    "eventID": "evt-sg-004"
+  }
+}
