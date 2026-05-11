@@ -1,0 +1,18 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TripWire — serverless AWS detection-and-response (5 detections, 2 remediations)
+
+Parameters:
+  SnsTopicArn:
+    Type: String
+    Description: ARN of the pre-existing tripwire-alerts SNS topic.
+
+Resources:
+  TripWirePlaceholder:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /tripwire/placeholder
+      RetentionInDays: 7
+
+Outputs:
+  StackRegion:
+    Value: !Ref AWS::Region
