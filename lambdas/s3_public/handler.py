@@ -99,11 +99,12 @@ def lambda_handler(event, _context):
     name = detail.get("eventName", "?")
 
     protected = bucket in PROTECTED
+    remediation_ok = False
     if protected:
         remediation_line = f"PROTECTED bucket ({bucket}) - auto-remediation skipped. Investigate manually."
     else:
-        ok, detail = _remediate(bucket)
-        remediation_line = f"REMEDIATED - {detail}" if ok else f"REMEDIATION {detail}"
+        remediation_ok, detail = _remediate(bucket)
+        remediation_line = f"REMEDIATED - {detail}" if remediation_ok else f"REMEDIATION {detail}"
 
     subject = f"[TripWire] CRITICAL - S3 bucket {bucket} made public"
     message = (
@@ -121,4 +122,4 @@ def lambda_handler(event, _context):
         f"Raw event ID: {event_id}\n"
     )
     boto3.client("sns").publish(TopicArn=TOPIC_ARN, Subject=subject[:99], Message=message)
-    return {"status": "alerted", "remediated": not protected, "bucket": bucket}
+    return {"status": "alerted", "remediated": remediation_ok, "protected": protected, "bucket": bucket}
